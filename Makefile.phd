@@ -1,0 +1,19 @@
+FROM #default USING build
+
+FROM golang:1-alpine as base
+
+FROM #build USING build:linux build:windows
+LABEL Description="Builds the binary for all platforms"
+ARTIFACT build/drmake* build/
+
+FROM #base as build:linux
+LABEL Description="Builds the binary file for Linux"
+ENV GOOS=linux
+ENV GOARCH=amd64
+CMD mkdir -p build && go build -o build/drmake ./cmd/drmake
+
+FROM #base as build:windows
+LABEL Description="Builds the binary file for Windows"
+ENV GOOS=windows
+ENV GOARCH=amd64
+CMD mkdir -p build && go build -o build/drmake ./cmd/drmake
