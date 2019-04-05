@@ -1,6 +1,8 @@
 FROM #default USING build
 
 FROM golang:1-alpine as base
+RUN apk add -U git
+ENV GOPATH /root/go
 
 FROM #build USING build:linux build:windows
 LABEL Description="Builds the binary for all platforms"
@@ -16,4 +18,4 @@ FROM #base as build:windows
 LABEL Description="Builds the binary file for Windows"
 ENV GOOS=windows
 ENV GOARCH=amd64
-CMD mkdir -p build && go build -o build/drmake ./cmd/drmake
+CMD mkdir -p build && go build -o build/drmake.exe ./cmd/drmake
