@@ -18,18 +18,18 @@ import (
 )
 
 const (
-	defaultStage = "default"
+	defaultTarget = "default"
 
 	version = "1.0"
 )
 
 var (
 	opts struct {
-		Makefile  string   `short:"f" long:"file" value-name:"FILE" default:"Makefile.phd" description:"The build file to parse stages from"`
+		Makefile  string   `short:"f" long:"file" value-name:"FILE" default:"Makefile.phd" description:"The build file to parse targets from"`
 		Fresh     bool     `long:"fresh" description:"Run containers in fresh volume (defaults to false)"`
 		Host      bool     `long:"host" description:"Mount images to host workspace volume"`
-		PrintList bool     `short:"s" long:"list" description:"Print a list of stages"`
-		Args      []string `short:"a" long:"arg" value-name:"ARG=value" description:"An argument in the form ARG=value to pass to a stage"`
+		PrintList bool     `short:"l" long:"list" description:"Print a list of targets"`
+		Args      []string `short:"a" long:"arg" value-name:"ARG=value" description:"An argument in the form ARG=value to pass to a target"`
 		Version   bool     `long:"version" description:"Show version information"`
 	}
 
@@ -39,7 +39,7 @@ var (
 	reFromLine = regexp.MustCompile(`(?i)^FROM\s+(\S+)(?:\s+AS\s+(\S+))?(?:\s+USING\s+(.+)$)?`)
 )
 
-type stage struct {
+type target struct {
 	name  string
 	image string
 	defn  string
@@ -49,9 +49,9 @@ type stage struct {
 	artifacts map[string]string
 }
 
-type stagelist map[string]*stage
+type targetlist map[string]*target
 
-func (s stagelist) find(name string) *stage {
+func (s targetlist) find(name string) *target {
 	if s[name] == nil {
 		log.Fatal("Unknown target: ", name)
 		return nil
@@ -59,12 +59,12 @@ func (s stagelist) find(name string) *stage {
 	return s[name]
 }
 
-func (s *stage) String() string {
-	return fmt.Sprintf("stage %s FROM %s: %s\n%s",
+func (s *target) String() string {
+	return fmt.Sprintf("target %s FROM %s: %s\n%s",
 		s.name, s.image, strings.Join(s.deps, " "), s.defn)
 }
 
-func (s *stage) Run(list stagelist) {
+func (s *target) Run(list targetlist) {
 	dfile := s.Dockerfile(list)
 	if dfile != "" || !strings.HasPrefix(s.image, "#") {
 		args := []string{"build", "--rm", "-t", image() + "/" + s.name}
@@ -109,16 +109,16 @@ func (s *stage) Run(list stagelist) {
 	}
 }
 
-func (s *stage) Dockerfile(list stagelist) string {
+func (s *target) Dockerfile(list targetlist) string {
 	preface := "FROM " + s.image
 	if strings.HasPrefix(s.image, "&") {
-		preface = s.dockerfileFromPath(filepath.Join(".drmake", "stages", s.image[1:]), list)
+		preface = s.dockerfileFromPath(filepath.Join(".drmake", "targets", s.image[1:]), list)
 	} else if strings.HasPrefix(s.image, "#") {
 		if s.image[1:] == s.name {
 			return ""
 		}
-		prestage := list.find(s.image[1:])
-		preface = strings.Trim(prestage.Dockerfile(list), " \r\n")
+		pretarget := list.find(s.image[1:])
+		preface = strings.Trim(pretarget.Dockerfile(list), " \r\n")
 	} else if strings.HasPrefix(s.image, "./") {
 		preface = s.dockerfileFromPath(s.image[2:], list)
 	}
@@ -126,7 +126,7 @@ func (s *stage) Dockerfile(list stagelist) string {
 	return strings.Join([]string{preface, s.defn}, "\n")
 }
 
-func (s *stage) dockerfileFromPath(path string, list stagelist) string {
+func (s *target) dockerfileFromPath(path string, list targetlist) string {
 	os.Chdir(filepath.Join(origdir, path))
 	data, err := ioutil.ReadFile("Dockerfile")
 	if err != nil {
@@ -137,7 +137,7 @@ func (s *stage) dockerfileFromPath(path string, list stagelist) string {
 }
 
 func main() {
-	runStageNames, err := flags.Parse(&opts)
+	runTargetNames, err := flags.Parse(&opts)
 	if err != nil {
 		os.Exit(1)
 	}
@@ -151,10 +151,10 @@ func main() {
 	tempdir, _ = ioutil.TempDir("", "")
 	defer os.RemoveAll(tempdir)
 
-	list := stagelist{}
-	defaultStage := parseMakefile(list)
-	if len(runStageNames) == 0 {
-		runStageNames = []string{defaultStage}
+	list := targetlist{}
+	defaultTarget := parseMakefile(list)
+	if len(runTargetNames) == 0 {
+		runTargetNames = []string{defaultTarget}
 	}
 
 	if opts.PrintList {
@@ -162,15 +162,15 @@ func main() {
 		return
 	}
 
-	run(list, runStageNames)
+	run(list, runTargetNames)
 }
 
-func print(list stagelist) {
+func print(list targetlist) {
 	longest := 0
 	namelist := []string{}
-	for name, stage := range list {
+	for name, target := range list {
 		if l := len(name); l > longest {
-			if stage.desc == "" {
+			if target.desc == "" {
 				continue
 			}
 			longest = l
@@ -181,28 +181,28 @@ func print(list stagelist) {
 
 	sort.Strings(namelist)
 	for _, name := range namelist {
-		stage := list[name]
-		fmt.Printf("drmake %-"+slongest+"s # %s\n", name, stage.desc)
+		target := list[name]
+		fmt.Printf("drmake %-"+slongest+"s # %s\n", name, target.desc)
 	}
 }
 
-func run(list stagelist, runStageNames []string) {
-	if len(runStageNames) == 0 {
-		runStageNames = []string{defaultStage}
+func run(list targetlist, runTargetNames []string) {
+	if len(runTargetNames) == 0 {
+		runTargetNames = []string{defaultTarget}
 	}
-	runStages := buildExecOrder(list, runStageNames)
-	orderedStages := make([]string, len(runStages))
-	for i, s := range runStages {
-		orderedStages[i] = s.name
+	runTargets := buildExecOrder(list, runTargetNames)
+	orderedTargets := make([]string, len(runTargets))
+	for i, s := range runTargets {
+		orderedTargets[i] = s.name
 	}
 	prepVolume()
-	for _, stage := range runStages {
-		stage.Run(list)
+	for _, target := range runTargets {
+		target.Run(list)
 	}
 }
 
-func parseMakefile(list stagelist) (defaultStage string) {
-	var astage *stage
+func parseMakefile(list targetlist) (defaultTarget string) {
+	var atarget *target
 	data, err := ioutil.ReadFile(opts.Makefile)
 	if err != nil {
 		log.Fatalf("Failed to find %s: %v", opts.Makefile, err)
@@ -238,20 +238,20 @@ func parseMakefile(list stagelist) (defaultStage string) {
 				name = c[len(c)-1]
 			}
 
-			astage = &stage{
+			atarget = &target{
 				name:      name,
 				image:     image,
 				deps:      deps,
 				artifacts: map[string]string{},
 			}
-			list[astage.name] = astage
-			if defaultStage == "" {
-				defaultStage = astage.name
+			list[atarget.name] = atarget
+			if defaultTarget == "" {
+				defaultTarget = atarget.name
 			}
 			continue
 		}
 
-		if astage == nil {
+		if atarget == nil {
 			continue
 		}
 
@@ -271,58 +271,58 @@ func parseMakefile(list stagelist) (defaultStage string) {
 			} else {
 				dst = s[0]
 			}
-			astage.artifacts[src] = dst
+			atarget.artifacts[src] = dst
 			continue
 		}
 
 		if len(c) > 1 && strings.ToUpper(c[0]) == "ENVARG" {
-			astage.defn += line[3:] + "\n"
+			atarget.defn += line[3:] + "\n"
 			if len(c) != 2 {
 				log.Fatal("ENVARG requires exactly one argument")
 			}
 			parts := strings.SplitN(c[1], "=", 2)
-			astage.defn += fmt.Sprintf("ENV %s=${%s}\n", parts[0], parts[0])
+			atarget.defn += fmt.Sprintf("ENV %s=${%s}\n", parts[0], parts[0])
 			continue
 		}
 
 		if len(c) > 1 && strings.ToUpper(c[0]) == "LABEL" {
 			kv := strings.SplitN(strings.Join(c[1:], " "), "=", 2)
 			if len(kv) == 2 && strings.ToLower(strings.Trim(kv[0], `"`)) == "description" {
-				astage.desc = strings.Trim(kv[1], `"`)
+				atarget.desc = strings.Trim(kv[1], `"`)
 			}
 		}
 
-		astage.defn += line + "\n"
+		atarget.defn += line + "\n"
 	}
 	return
 }
 
-func buildExecOrder(list stagelist, targets []string) (out []*stage) {
-	unordStages := []string{}
-	ordStages := map[string]int{}
+func buildExecOrder(list targetlist, targets []string) (out []*target) {
+	unordTargets := []string{}
+	ordTargets := map[string]int{}
 
-	for _, target := range targets {
-		stage := list.find(target)
-		depStages := buildExecOrder(list, stage.deps)
-		depStageNames := make([]string, len(depStages))
-		for i, s := range depStages {
-			depStageNames[i] = s.name
+	for _, targName := range targets {
+		target := list.find(targName)
+		depTargets := buildExecOrder(list, target.deps)
+		depTargetNames := make([]string, len(depTargets))
+		for i, s := range depTargets {
+			depTargetNames[i] = s.name
 		}
-		unordStages = append(unordStages, append(append([]string{}, depStageNames...), target)...)
+		unordTargets = append(unordTargets, append(append([]string{}, depTargetNames...), targName)...)
 	}
 
 	n := 0
-	for _, name := range unordStages {
-		if ordStages[name] != 0 {
+	for _, name := range unordTargets {
+		if ordTargets[name] != 0 {
 			continue
 		}
 
 		n++
-		ordStages[name] = n
+		ordTargets[name] = n
 	}
 
-	out = make([]*stage, len(ordStages))
-	for name, idx := range ordStages {
+	out = make([]*target, len(ordTargets))
+	for name, idx := range ordTargets {
 		out[idx-1] = list.find(name)
 	}
 
