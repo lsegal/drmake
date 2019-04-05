@@ -140,6 +140,7 @@ running `cp -R` with the src and dst arguments.
 ## TODO
 
 - [ ] Support targets sourced from other Git repos (`https://` & `git://`)
+- [ ] Support lookup paths for target directories via `DRMAKE_PATH` or `-I`.
 - [ ] Better parsing and error messages
 - [ ] Tests
 - [ ] Possibly a whole new syntax closer to [GitHub Actions][actions]?
