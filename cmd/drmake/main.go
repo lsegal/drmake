@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/sha1"
-	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -14,17 +13,25 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	flags "github.com/jessevdk/go-flags"
 )
 
 const (
 	defaultStage = "default"
+
+	version = "1.0"
 )
 
 var (
-	makefile  = flag.String("f", "Makefile.phd", "The build file to parse stages from")
-	fresh     = flag.Bool("fresh", false, "If fresh image should be used")
-	host      = flag.Bool("host", false, "Mount to host volume")
-	printList = flag.Bool("s", false, "List stages")
+	opts struct {
+		Makefile  string   `short:"f" long:"file" value-name:"FILE" default:"Makefile.phd" description:"The build file to parse stages from"`
+		Fresh     bool     `long:"fresh" description:"Run containers in fresh volume (defaults to false)"`
+		Host      bool     `long:"host" description:"Mount images to host workspace volume"`
+		PrintList bool     `short:"s" long:"list" description:"Print a list of stages"`
+		Args      []string `short:"a" long:"arg" value-name:"ARG=value" description:"An argument in the form ARG=value to pass to a stage"`
+		Version   bool     `long:"version" description:"Show version information"`
+	}
 
 	tempdir string
 	origdir string
@@ -60,21 +67,32 @@ func (s *stage) String() string {
 func (s *stage) Run(list stagelist) {
 	dfile := s.Dockerfile(list)
 	if dfile != "" || !strings.HasPrefix(s.image, "#") {
-		cmd := exec.Command("docker", "build", "--rm", "-t", image()+"/"+s.name, "-")
+		args := []string{"build", "--rm", "-t", image() + "/" + s.name}
+		buildArgs := []string{}
+		for _, arg := range opts.Args {
+			buildArgs = append(buildArgs, []string{"--build-arg", arg}...)
+		}
+		args = append(args, buildArgs...)
+		args = append(args, "-")
+		cmd := exec.Command("docker", args...)
 		cmd.Stdin = strings.NewReader(dfile)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		cmd.Run()
+		if err := cmd.Run(); err != nil {
+			os.Exit(1)
+		}
 
-		cmd = exec.Command("docker", "run", "--rm", "-v",
-			vol()+":/work", "-w", "/work", "-it", image()+"/"+s.name)
+		cmd = exec.Command("docker", "run", "--rm", "-v", cachevol()+":/root",
+			"-v", wsvol()+":/work", "-w", "/work", "-it", image()+"/"+s.name)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		cmd.Run()
+		if err := cmd.Run(); err != nil {
+			os.Exit(1)
+		}
 	}
 
-	if len(s.artifacts) > 0 {
+	if !opts.Host && len(s.artifacts) > 0 {
 		uid := os.Getuid()
 		gid := os.Getgid()
 		for src, dst := range s.artifacts {
@@ -119,7 +137,15 @@ func (s *stage) dockerfileFromPath(path string, list stagelist) string {
 }
 
 func main() {
-	flag.Parse()
+	runStageNames, err := flags.Parse(&opts)
+	if err != nil {
+		os.Exit(1)
+	}
+
+	if opts.Version {
+		fmt.Println("drmake " + version)
+		return
+	}
 
 	origdir, _ = os.Getwd()
 	tempdir, _ = ioutil.TempDir("", "")
@@ -127,13 +153,16 @@ func main() {
 
 	list := stagelist{}
 	defaultStage := parseMakefile(list)
+	if len(runStageNames) == 0 {
+		runStageNames = []string{defaultStage}
+	}
 
-	if *printList {
+	if opts.PrintList {
 		print(list)
 		return
 	}
 
-	run(list, defaultStage)
+	run(list, runStageNames)
 }
 
 func print(list stagelist) {
@@ -157,8 +186,7 @@ func print(list stagelist) {
 	}
 }
 
-func run(list stagelist, defaultStage string) {
-	runStageNames := flag.Args()
+func run(list stagelist, runStageNames []string) {
 	if len(runStageNames) == 0 {
 		runStageNames = []string{defaultStage}
 	}
@@ -175,15 +203,22 @@ func run(list stagelist, defaultStage string) {
 
 func parseMakefile(list stagelist) (defaultStage string) {
 	var astage *stage
-	data, err := ioutil.ReadFile(*makefile)
+	data, err := ioutil.ReadFile(opts.Makefile)
 	if err != nil {
-		log.Fatalf("Failed to find %s: %v", *makefile, err)
+		log.Fatalf("Failed to find %s: %v", opts.Makefile, err)
 		return
 	}
 
 	lines := strings.Split(string(data), "\n")
+	prev := ""
 	for _, line := range lines {
-		line = strings.Trim(line, " \r\n")
+		line = prev + strings.Trim(line, " \r\n")
+		if strings.HasSuffix(line, " \\") {
+			prev = line[0 : len(line)-1]
+			continue
+		} else {
+			prev = ""
+		}
 		if line == "" || line[0] == '#' {
 			continue
 		}
@@ -240,6 +275,16 @@ func parseMakefile(list stagelist) (defaultStage string) {
 			continue
 		}
 
+		if len(c) > 1 && strings.ToUpper(c[0]) == "ENVARG" {
+			astage.defn += line[3:] + "\n"
+			if len(c) != 2 {
+				log.Fatal("ENVARG requires exactly one argument")
+			}
+			parts := strings.SplitN(c[1], "=", 2)
+			astage.defn += fmt.Sprintf("ENV %s=${%s}\n", parts[0], parts[0])
+			continue
+		}
+
 		if len(c) > 1 && strings.ToUpper(c[0]) == "LABEL" {
 			kv := strings.SplitN(strings.Join(c[1:], " "), "=", 2)
 			if len(kv) == 2 && strings.ToLower(strings.Trim(kv[0], `"`)) == "description" {
@@ -285,25 +330,31 @@ func buildExecOrder(list stagelist, targets []string) (out []*stage) {
 }
 
 func prepVolume() {
-	if *host {
+	if opts.Host {
 		return
 	}
 
-	volname := vol()
-	if *fresh {
-		cmd := exec.Command("docker", "volume", "rm", "-f", volname)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		cmd.Run()
+	vols := []string{wsvol(), cachevol()}
+
+	for _, vol := range vols {
+		if opts.Fresh {
+			cmd := exec.Command("docker", "volume", "rm", "-f", vol)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Run()
+		}
 	}
 
-	cmd := exec.Command("docker", "volume", "create", volname)
+	cmd := exec.Command("docker", "volume", "create", wsvol())
 	if err := cmd.Run(); err == nil {
 		copyVol("/srv/.", "/work")
 	}
 }
 
 func copyVolAll(src, dst string) error {
+	if opts.Host {
+		return nil
+	}
 	finaldst := dst
 	if !strings.HasSuffix(finaldst, "/") {
 		finaldst = path.Dir(finaldst)
@@ -319,20 +370,28 @@ func copyVolAll(src, dst string) error {
 }
 
 func copyVol(src, dst string) error {
+	if opts.Host {
+		return nil
+	}
+	log.Printf("Copying data: %s -> %s\n", src, dst)
 	cmd := exec.Command("docker", "run", "--rm", "-v", origdir+":/srv", "-v",
-		vol()+":/work", "alpine", "sh", "-c", "cp -R "+src+" "+dst)
+		wsvol()+":/work", "alpine", "sh", "-c", "cp -R "+src+" "+dst)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
-func vol() string {
-	if *host {
+func wsvol() string {
+	if opts.Host {
 		return origdir
 	}
-	return image()
+	return fmt.Sprintf("drmake-ws-%x", sha1.Sum([]byte(opts.Makefile)))
+}
+
+func cachevol() string {
+	return fmt.Sprintf("drmake-cache-%x", sha1.Sum([]byte(opts.Makefile)))
 }
 
 func image() string {
-	return fmt.Sprintf("drmake-%x", sha1.Sum([]byte(*makefile)))
+	return fmt.Sprintf("drmake-%x", sha1.Sum([]byte(opts.Makefile)))
 }
